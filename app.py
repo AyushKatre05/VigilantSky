@@ -1,68 +1,77 @@
+import os
+import datetime
 import cv2
 import torch
 import numpy as np
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 from PIL import Image
 
-model = torch.hub.load('ultralytics/yolov5', 'custom', path='C:/Users/ayush/OneDrive/Desktop/drone_model/runs/detect/train13/weights/best.pt', source='github')
-cap = cv2.VideoCapture(0)
+app = Flask(__name__)
+CORS(app)
 
-classes = ['Drone']
+# Load YOLOv5 model for drone detection
+model = torch.hub.load('ultralytics/yolov5', 'custom', path='C:/Users/ayush/OneDrive/Desktop/bird/Drone-Detection-Model/runs/detect/train13/weights/best.pt', source='github')
 
-rectangle_coords = [(50, 50), (250, 50), (250, 250), (50, 250)]
-rectangle_drag = False
-drag_corner = -1
+# Create directories to store images
+os.makedirs("uploads", exist_ok=True)
+os.makedirs("processed", exist_ok=True)
 
-def mouse_event(event, x, y, flags, param):
-    global rectangle_coords, rectangle_drag, drag_corner
+@app.route("/")
+def home():
+    return "Drone Detection Backend Running!"
 
-    if event == cv2.EVENT_LBUTTONDOWN:
-        for i, corner in enumerate(rectangle_coords):
-            if abs(corner[0] - x) <= 10 and abs(corner[1] - y) <= 10:
-                rectangle_drag = True
-                drag_corner = i
-                break
+def process_image(image_path):
+    """Process an image using YOLOv5 for drone detection."""
+    image = cv2.imread(image_path)
+    if image is None:
+        return {"error": "Invalid image"}
 
-    elif event == cv2.EVENT_LBUTTONUP:
-        rectangle_drag = False
-
-    elif event == cv2.EVENT_MOUSEMOVE:
-        if rectangle_drag:
-            rectangle_coords[drag_corner] = (x, y)
-
-cv2.namedWindow('frame')
-cv2.setMouseCallback('frame', mouse_event)
-
-while True:
-    ret, frame = cap.read()
-
-    img = Image.fromarray(frame[...,::-1])
-
+    img = Image.fromarray(image[..., ::-1])  # Convert OpenCV BGR to RGB
     results = model(img, size=640)
 
+    detected_objects = []
+    
     for result in results.xyxy[0]:
         x1, y1, x2, y2, conf, cls = result.tolist()
-        if conf > 0.5 and classes[int(cls)] in classes:
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-            text_conf = "{:.2f}%".format(conf * 100)
-            cv2.putText(frame, text_conf, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            text_coords = "({}, {})".format(int((x1 + x2) / 2), int(y2))
-            cv2.putText(frame, text_coords, (int(x1), int(y2) + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            if rectangle_coords[0] != rectangle_coords[1]:
-                if any(rectangle_coords[0][0] <= x <= rectangle_coords[2][0] and rectangle_coords[0][1] <= y <= rectangle_coords[2][1] for x, y in
-                    [(x1, y1), (x1, y2), (x2, y1), (x2, y2)]) or \
-                        any(rectangle_coords[0][0] <= x <= rectangle_coords[2][0] and rectangle_coords[0][1] <= y <= rectangle_coords[2][1] for x in range(int(x1), int(x2))
-                            for y in range(int(y1), int(y2))):
-                    cv2.putText(frame, "Warning: Drone Detected Under Restricted Area!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        if conf > 0.5:
+            cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+            text = f"Drone {conf * 100:.2f}%"
+            cv2.putText(image, text, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            
+            detected_objects.append({
+                "class": "Drone",
+                "confidence": round(conf, 2),
+                "bbox": [int(x1), int(y1), int(x2), int(y2)]
+            })
 
+    processed_filename = "processed_" + os.path.basename(image_path)
+    processed_path = os.path.join("processed", processed_filename)
+    cv2.imwrite(processed_path, image)
 
-    for i in range(4):
-        cv2.circle(frame, rectangle_coords[i], 5, (0, 255, 0), -1)
-        cv2.line(frame, rectangle_coords[i], rectangle_coords[(i+1)%4], (0, 255, 0), 2)
+    # Fix result_image URL to be relative
+    return {
+        "detections": detected_objects,
+        "result_image": f"/processed/{processed_filename}"  # This ensures frontend adds the base URL correctly
+    }
 
-    cv2.imshow('frame', frame)
+@app.route("/detect/drone", methods=["POST"])
+def detect_drone():
+    """Detect drones in an uploaded image."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
 
-    if cv2.waitKey(1) == ord('q'):
-        break
+    file = request.files["file"]
+    filename = datetime.datetime.now().strftime("drone_%Y-%m-%d_%H-%M-%S.jpg")
+    filepath = os.path.join("uploads", filename)
+    file.save(filepath)
 
-cap.release()
-cv2.destroyAllWindows()
+    results = process_image(filepath)
+    return jsonify(results)
+
+@app.route("/processed/<filename>")
+def get_processed_image(filename):
+    return send_from_directory("processed", filename)
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5002)
